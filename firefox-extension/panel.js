@@ -57,7 +57,7 @@ let isDiscoveryInProgress = false;
 let discoveryController = null;
 
 // Load saved settings on startup
-browserAPI.storage.local.get(["browserConnectorSettings"], (result) => {
+browserAPI.storage.local.get(["browserConnectorSettings"]).then((result) => {
   if (result.browserConnectorSettings) {
     settings = { ...settings, ...result.browserConnectorSettings };
     updateUIFromSettings();
@@ -67,6 +67,12 @@ browserAPI.storage.local.get(["browserConnectorSettings"], (result) => {
   createConnectionBanner();
 
   // Automatically discover server on panel load with quiet mode enabled
+  discoverServer(true);
+}).catch((error) => {
+  console.error("Error loading settings:", error);
+
+  // Still create UI even if settings fail to load
+  createConnectionBanner();
   discoverServer(true);
 });
 
@@ -395,7 +401,9 @@ function updateUIFromSettings() {
 
 // Save settings
 function saveSettings() {
-  browserAPI.storage.local.set({ browserConnectorSettings: settings });
+  browserAPI.storage.local.set({ browserConnectorSettings: settings }).catch((error) => {
+    console.error("Error saving settings:", error);
+  });
   // Notify devtools.js about settings change
   browserAPI.runtime.sendMessage({
     type: "SETTINGS_UPDATED",

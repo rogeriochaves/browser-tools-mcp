@@ -1,20 +1,5 @@
 // devtools.js
 
-// Cross-browser compatibility
-const browserAPI = typeof browser !== 'undefined' ? browser : chrome;
-
-// Cross-browser AbortSignal.timeout polyfill
-function createTimeoutSignal(timeout) {
-  if (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) {
-    return AbortSignal.timeout(timeout);
-  }
-
-  // Fallback for older browsers
-  const controller = new AbortController();
-  setTimeout(() => controller.abort(), timeout);
-  return controller.signal;
-}
-
 // Store settings with defaults
 let settings = {
   logLimit: 50,
@@ -32,32 +17,19 @@ let settings = {
 // Keep track of debugger state
 let isDebuggerAttached = false;
 let attachDebuggerRetries = 0;
-const currentTabId = browserAPI.devtools?.inspectedWindow?.tabId;
+const currentTabId = chrome.devtools.inspectedWindow.tabId;
 const MAX_ATTACH_RETRIES = 3;
 const ATTACH_RETRY_DELAY = 1000; // 1 second
 
-// WebSocket connection management (declare early to avoid initialization errors)
-let ws = null;
-let wsReconnectTimeout = null;
-let heartbeatInterval = null;
-const WS_RECONNECT_DELAY = 5000; // 5 seconds
-const HEARTBEAT_INTERVAL = 30000; // 30 seconds
-// Add a flag to track if we need to reconnect after identity validation
-let reconnectAfterValidation = false;
-// Track if we're intentionally closing the connection
-let intentionalClosure = false;
-
 // Load saved settings on startup
-browserAPI.storage.local.get(["browserConnectorSettings"]).then((result) => {
+chrome.storage.local.get(["browserConnectorSettings"], (result) => {
   if (result.browserConnectorSettings) {
     settings = { ...settings, ...result.browserConnectorSettings };
   }
-}).catch((error) => {
-  console.error("Error loading settings:", error);
 });
 
 // Listen for settings updates
-browserAPI.runtime.onMessage.addListener((message, sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "SETTINGS_UPDATED") {
     settings = message.settings;
 
@@ -389,7 +361,7 @@ async function validateServerIdentity() {
     const response = await fetch(
       `http://${settings.serverHost}:${settings.serverPort}/.identity`,
       {
-        signal: createTimeoutSignal(3000), // 3 second timeout
+        signal: AbortSignal.timeout(3000), // 3 second timeout
       }
     );
 
@@ -399,7 +371,7 @@ async function validateServerIdentity() {
       );
 
       // Notify about the connection failure
-      browserAPI.runtime.sendMessage({
+      chrome.runtime.sendMessage({
         type: "SERVER_VALIDATION_FAILED",
         reason: "http_error",
         status: response.status,
@@ -417,7 +389,7 @@ async function validateServerIdentity() {
       console.error("Server identity validation failed: Invalid signature");
 
       // Notify about the invalid signature
-      browserAPI.runtime.sendMessage({
+      chrome.runtime.sendMessage({
         type: "SERVER_VALIDATION_FAILED",
         reason: "invalid_signature",
         serverHost: settings.serverHost,
@@ -432,7 +404,7 @@ async function validateServerIdentity() {
     );
 
     // Notify about successful validation
-    browserAPI.runtime.sendMessage({
+    chrome.runtime.sendMessage({
       type: "SERVER_VALIDATION_SUCCESS",
       serverInfo: identity,
       serverHost: settings.serverHost,
@@ -444,7 +416,7 @@ async function validateServerIdentity() {
     console.error("Server identity validation failed:", error);
 
     // Notify about the connection error
-    browserAPI.runtime.sendMessage({
+    chrome.runtime.sendMessage({
       type: "SERVER_VALIDATION_FAILED",
       reason: "connection_error",
       error: error.message,
@@ -482,7 +454,7 @@ function wipeLogs() {
 }
 
 // Listen for page refreshes
-browserAPI.devtools.network.onNavigated.addListener((url) => {
+chrome.devtools.network.onNavigated.addListener((url) => {
   console.log("Page navigated/refreshed - wiping logs");
   wipeLogs();
 
@@ -496,7 +468,7 @@ browserAPI.devtools.network.onNavigated.addListener((url) => {
       JSON.stringify({
         type: "page-navigated",
         url: url,
-        tabId: browserAPI.devtools.inspectedWindow.tabId,
+        tabId: chrome.devtools.inspectedWindow.tabId,
         timestamp: Date.now(),
       })
     );
@@ -504,23 +476,9 @@ browserAPI.devtools.network.onNavigated.addListener((url) => {
 });
 
 // 1) Listen for network requests
-browserAPI.devtools.network.onRequestFinished.addListener((request) => {
+chrome.devtools.network.onRequestFinished.addListener((request) => {
   if (request._resourceType === "xhr" || request._resourceType === "fetch") {
-    // Convert getContent to promise-based for cross-browser compatibility
-    const getContentPromise = new Promise((resolve) => {
-      try {
-        request.getContent(resolve);
-      } catch (error) {
-        // If callback version fails, try promise version
-        if (request.getContent && typeof request.getContent().then === 'function') {
-          request.getContent().then(resolve).catch(() => resolve(""));
-        } else {
-          resolve("");
-        }
-      }
-    });
-
-    getContentPromise.then((responseBody) => {
+    request.getContent((responseBody) => {
       const entry = {
         type: "network-request",
         url: request.request.url,
@@ -532,40 +490,14 @@ browserAPI.devtools.network.onRequestFinished.addListener((request) => {
         responseBody: responseBody ?? "",
       };
       sendToBrowserConnector(entry);
-    }).catch((error) => {
-      console.error("Error getting network request content:", error);
-      // Send entry without response body if getContent fails
-      const entry = {
-        type: "network-request",
-        url: request.request.url,
-        method: request.request.method,
-        status: request.response.status,
-        requestHeaders: request.request.headers,
-        responseHeaders: request.response.headers,
-        requestBody: request.request.postData?.text ?? "",
-        responseBody: "",
-      };
-      sendToBrowserConnector(entry);
     });
   }
 });
 
 // Helper function to attach debugger
 async function attachDebugger() {
-  console.log("Chrome Extension: Attempting to attach debugger to tab:", currentTabId);
-
-  // Check if debugger API is available (Firefox may not have it)
-  if (!browserAPI.debugger) {
-    console.warn("Debugger API not available in this browser - using alternative console capture");
-    isDebuggerAttached = false;
-
-    // Try Firefox-specific console capture using content scripts
-    setupFirefoxConsoleCapture();
-    return;
-  }
-
   // First check if we're already attached to this tab
-  browserAPI.debugger.getTargets((targets) => {
+  chrome.debugger.getTargets((targets) => {
     const isAlreadyAttached = targets.some(
       (target) => target.tabId === currentTabId && target.attached
     );
@@ -573,10 +505,10 @@ async function attachDebugger() {
     if (isAlreadyAttached) {
       console.log("Found existing debugger attachment, detaching first...");
       // Force detach first to ensure clean state
-      browserAPI.debugger.detach({ tabId: currentTabId }, () => {
+      chrome.debugger.detach({ tabId: currentTabId }, () => {
         // Ignore any errors during detach
-        if (browserAPI.runtime.lastError) {
-          console.log("Error during forced detach:", browserAPI.runtime.lastError);
+        if (chrome.runtime.lastError) {
+          console.log("Error during forced detach:", chrome.runtime.lastError);
         }
         // Now proceed with fresh attachment
         performAttach();
@@ -590,27 +522,26 @@ async function attachDebugger() {
 
 function performAttach() {
   console.log("Performing debugger attachment to tab:", currentTabId);
-  browserAPI.debugger.attach({ tabId: currentTabId }, "1.3", () => {
-    if (browserAPI.runtime.lastError) {
-      console.error("Failed to attach debugger:", browserAPI.runtime.lastError);
-      console.error("Error details:", browserAPI.runtime.lastError.message);
+  chrome.debugger.attach({ tabId: currentTabId }, "1.3", () => {
+    if (chrome.runtime.lastError) {
+      console.error("Failed to attach debugger:", chrome.runtime.lastError);
       isDebuggerAttached = false;
       return;
     }
 
     isDebuggerAttached = true;
-    console.log("Debugger successfully attached to tab:", currentTabId);
+    console.log("Debugger successfully attached");
 
     // Add the event listener when attaching
-    browserAPI.debugger.onEvent.addListener(consoleMessageListener);
+    chrome.debugger.onEvent.addListener(consoleMessageListener);
 
-    browserAPI.debugger.sendCommand(
+    chrome.debugger.sendCommand(
       { tabId: currentTabId },
       "Runtime.enable",
       {},
       () => {
-        if (browserAPI.runtime.lastError) {
-          console.error("Failed to enable runtime:", browserAPI.runtime.lastError);
+        if (chrome.runtime.lastError) {
+          console.error("Failed to enable runtime:", chrome.runtime.lastError);
           return;
         }
         console.log("Runtime API successfully enabled");
@@ -619,31 +550,13 @@ function performAttach() {
   });
 }
 
-// Firefox-specific console capture using content script
-function setupFirefoxConsoleCapture() {
-  console.log("Firefox detected - console capture via content script and background relay");
-
-  // The content script will send messages directly to the background script
-  // which will then relay them to the server. No need for complex DevTools communication.
-  isDebuggerAttached = true; // Mark as "attached" for Firefox
-
-  console.log("Firefox console capture set up - messages will be relayed via background script");
-}
-
 // Helper function to detach debugger
 function detachDebugger() {
-  // Check if debugger API is available
-  if (!browserAPI.debugger) {
-    console.log("Debugger API not available - nothing to detach");
-    isDebuggerAttached = false;
-    return;
-  }
-
   // Remove the event listener first
-  browserAPI.debugger.onEvent.removeListener(consoleMessageListener);
+  chrome.debugger.onEvent.removeListener(consoleMessageListener);
 
   // Check if debugger is actually attached before trying to detach
-  browserAPI.debugger.getTargets((targets) => {
+  chrome.debugger.getTargets((targets) => {
     const isStillAttached = targets.some(
       (target) => target.tabId === currentTabId && target.attached
     );
@@ -654,11 +567,11 @@ function detachDebugger() {
       return;
     }
 
-    browserAPI.debugger.detach({ tabId: currentTabId }, () => {
-      if (browserAPI.runtime.lastError) {
+    chrome.debugger.detach({ tabId: currentTabId }, () => {
+      if (chrome.runtime.lastError) {
         console.warn(
           "Warning during debugger detach:",
-          browserAPI.runtime.lastError
+          chrome.runtime.lastError
         );
       }
       isDebuggerAttached = false;
@@ -669,11 +582,8 @@ function detachDebugger() {
 
 // Move the console message listener outside the panel creation
 const consoleMessageListener = (source, method, params) => {
-  console.log("Console message listener called:", { source, method, params });
-
   // Only process events for our tab
   if (source.tabId !== currentTabId) {
-    console.log("Ignoring event for different tab:", source.tabId, "vs", currentTabId);
     return;
   }
 
@@ -736,7 +646,7 @@ const consoleMessageListener = (source, method, params) => {
 };
 
 // 2) Use DevTools Protocol to capture console logs
-browserAPI.devtools.panels.create("BrowserToolsMCP", "", "panel.html").then((panel) => {
+chrome.devtools.panels.create("BrowserToolsMCP", "", "panel.html", (panel) => {
   // Initial attach - we'll keep the debugger attached as long as DevTools is open
   attachDebugger();
 
@@ -746,8 +656,6 @@ browserAPI.devtools.panels.create("BrowserToolsMCP", "", "panel.html").then((pan
       attachDebugger();
     }
   });
-}).catch((error) => {
-  console.error("Error creating DevTools panel:", error);
 });
 
 // Clean up when DevTools closes
@@ -780,7 +688,7 @@ window.addEventListener("unload", () => {
 
 // Function to capture and send element data
 function captureAndSendElement() {
-  browserAPI.devtools.inspectedWindow.eval(
+  chrome.devtools.inspectedWindow.eval(
     `(function() {
       const el = $0;  // $0 is the currently selected element in DevTools
       if (!el) return null;
@@ -821,11 +729,20 @@ function captureAndSendElement() {
 }
 
 // Listen for element selection in the Elements panel
-browserAPI.devtools.panels.elements.onSelectionChanged.addListener(() => {
+chrome.devtools.panels.elements.onSelectionChanged.addListener(() => {
   captureAndSendElement();
 });
 
-// WebSocket connection management variables are declared at the top of the file
+// WebSocket connection management
+let ws = null;
+let wsReconnectTimeout = null;
+let heartbeatInterval = null;
+const WS_RECONNECT_DELAY = 5000; // 5 seconds
+const HEARTBEAT_INTERVAL = 30000; // 30 seconds
+// Add a flag to track if we need to reconnect after identity validation
+let reconnectAfterValidation = false;
+// Track if we're intentionally closing the connection
+let intentionalClosure = false;
 
 // Function to send a heartbeat to keep the WebSocket connection alive
 function sendHeartbeat() {
@@ -895,7 +812,7 @@ async function setupWebSocket() {
       heartbeatInterval = setInterval(sendHeartbeat, HEARTBEAT_INTERVAL);
 
       // Notify that connection is successful
-      browserAPI.runtime.sendMessage({
+      chrome.runtime.sendMessage({
         type: "WEBSOCKET_CONNECTED",
         serverHost: settings.serverHost,
         serverPort: settings.serverPort,
@@ -903,19 +820,19 @@ async function setupWebSocket() {
 
       // Send the current URL to the server right after connection
       // This ensures the server has the URL even if no navigation occurs
-      browserAPI.runtime.sendMessage(
+      chrome.runtime.sendMessage(
         {
           type: "GET_CURRENT_URL",
-          tabId: browserAPI.devtools.inspectedWindow.tabId,
+          tabId: chrome.devtools.inspectedWindow.tabId,
         },
         (response) => {
-          if (browserAPI.runtime.lastError) {
+          if (chrome.runtime.lastError) {
             console.error(
               "Chrome Extension: Error getting URL from background on connection:",
-              browserAPI.runtime.lastError
+              chrome.runtime.lastError
             );
 
-            // If normal method fails, try fallback to browserAPI.tabs API directly
+            // If normal method fails, try fallback to chrome.tabs API directly
             tryFallbackGetUrl();
             return;
           }
@@ -927,9 +844,9 @@ async function setupWebSocket() {
             );
 
             // Send the URL to the server via the background script
-            browserAPI.runtime.sendMessage({
+            chrome.runtime.sendMessage({
               type: "UPDATE_SERVER_URL",
-              tabId: browserAPI.devtools.inspectedWindow.tabId,
+              tabId: chrome.devtools.inspectedWindow.tabId,
               url: response.url,
               source: "initial_connection",
             });
@@ -945,11 +862,11 @@ async function setupWebSocket() {
         console.log("Chrome Extension: Trying fallback method to get URL");
 
         // Try to get the URL directly using the tabs API
-        browserAPI.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-          if (browserAPI.runtime.lastError) {
+        chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+          if (chrome.runtime.lastError) {
             console.error(
               "Chrome Extension: Fallback URL retrieval failed:",
-              browserAPI.runtime.lastError
+              chrome.runtime.lastError
             );
             return;
           }
@@ -961,9 +878,9 @@ async function setupWebSocket() {
             );
 
             // Send the URL to the server
-            browserAPI.runtime.sendMessage({
+            chrome.runtime.sendMessage({
               type: "UPDATE_SERVER_URL",
-              tabId: browserAPI.devtools.inspectedWindow.tabId,
+              tabId: chrome.devtools.inspectedWindow.tabId,
               url: tabs[0].url,
               source: "fallback_method",
             });
@@ -1049,19 +966,17 @@ async function setupWebSocket() {
           // console.log("Chrome Extension: Received heartbeat response");
         } else if (message.type === "take-screenshot") {
           console.log("Chrome Extension: Taking screenshot...");
-          // Firefox-specific screenshot handling
-          try {
-            // In Firefox, we need to handle captureVisibleTab differently
-            browserAPI.tabs.captureVisibleTab(null, { format: "png" }, (dataUrl) => {
-              if (browserAPI.runtime.lastError) {
-                console.error(
-                  "Chrome Extension: Screenshot capture failed:",
-                  browserAPI.runtime.lastError
-                );
+          // Capture screenshot of the current tab
+          chrome.tabs.captureVisibleTab(null, { format: "png" }, (dataUrl) => {
+            if (chrome.runtime.lastError) {
+              console.error(
+                "Chrome Extension: Screenshot capture failed:",
+                chrome.runtime.lastError
+              );
               ws.send(
                 JSON.stringify({
                   type: "screenshot-error",
-                  error: browserAPI.runtime.lastError.message,
+                  error: chrome.runtime.lastError.message,
                   requestId: message.requestId,
                 })
               );
@@ -1086,17 +1001,7 @@ async function setupWebSocket() {
             });
 
             ws.send(JSON.stringify(response));
-            });
-          } catch (error) {
-            console.error("Chrome Extension: Screenshot capture error:", error);
-            if (ws && ws.readyState === WebSocket.OPEN) {
-              ws.send(JSON.stringify({
-                type: "screenshot-error",
-                error: error.message,
-                requestId: message.requestId,
-              }));
-            }
-          }
+          });
         } else if (message.type === "get-current-url") {
           console.log("Chrome Extension: Received request for current URL");
 
@@ -1105,16 +1010,16 @@ async function setupWebSocket() {
           const maxRetries = 2;
 
           const requestCurrentUrl = () => {
-            browserAPI.runtime.sendMessage(
+            chrome.runtime.sendMessage(
               {
                 type: "GET_CURRENT_URL",
-                tabId: browserAPI.devtools.inspectedWindow.tabId,
+                tabId: chrome.devtools.inspectedWindow.tabId,
               },
               (response) => {
-                if (browserAPI.runtime.lastError) {
+                if (chrome.runtime.lastError) {
                   console.error(
                     "Chrome Extension: Error getting URL from background:",
-                    browserAPI.runtime.lastError
+                    chrome.runtime.lastError
                   );
 
                   // Retry logic
@@ -1131,10 +1036,10 @@ async function setupWebSocket() {
                     JSON.stringify({
                       type: "current-url-response",
                       url: null,
-                      tabId: browserAPI.devtools.inspectedWindow.tabId,
+                      tabId: chrome.devtools.inspectedWindow.tabId,
                       error:
                         "Failed to get URL from background: " +
-                        browserAPI.runtime.lastError.message,
+                        chrome.runtime.lastError.message,
                       requestId: message.requestId,
                     })
                   );
@@ -1150,7 +1055,7 @@ async function setupWebSocket() {
                     JSON.stringify({
                       type: "current-url-response",
                       url: response.url,
-                      tabId: browserAPI.devtools.inspectedWindow.tabId,
+                      tabId: chrome.devtools.inspectedWindow.tabId,
                       requestId: message.requestId,
                     })
                   );
@@ -1161,7 +1066,7 @@ async function setupWebSocket() {
                   );
 
                   // Last resort - try to get URL directly from the tab
-                  browserAPI.tabs.query(
+                  chrome.tabs.query(
                     { active: true, currentWindow: true },
                     (tabs) => {
                       const url = tabs && tabs[0] && tabs[0].url;
@@ -1174,7 +1079,7 @@ async function setupWebSocket() {
                         JSON.stringify({
                           type: "current-url-response",
                           url: url || null,
-                          tabId: browserAPI.devtools.inspectedWindow.tabId,
+                          tabId: chrome.devtools.inspectedWindow.tabId,
                           error:
                             response?.error ||
                             "Failed to get URL from background",

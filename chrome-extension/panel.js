@@ -1,38 +1,3 @@
-// Cross-browser compatibility
-const browserAPI = typeof browser !== 'undefined' ? browser : chrome;
-
-// Cross-browser AbortSignal.timeout polyfill
-function createTimeoutSignal(timeout) {
-  if (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) {
-    return AbortSignal.timeout(timeout);
-  }
-
-  // Fallback for older browsers
-  const controller = new AbortController();
-  setTimeout(() => controller.abort(), timeout);
-  return controller.signal;
-}
-
-// Cross-browser AbortSignal.any polyfill
-function createCombinedSignal(signals) {
-  if (typeof AbortSignal !== 'undefined' && AbortSignal.any) {
-    return AbortSignal.any(signals);
-  }
-
-  // Fallback for older browsers
-  const controller = new AbortController();
-
-  signals.forEach(signal => {
-    if (signal.aborted) {
-      controller.abort();
-      return;
-    }
-    signal.addEventListener('abort', () => controller.abort());
-  });
-
-  return controller.signal;
-}
-
 // Store settings
 let settings = {
   logLimit: 50,
@@ -57,7 +22,7 @@ let isDiscoveryInProgress = false;
 let discoveryController = null;
 
 // Load saved settings on startup
-browserAPI.storage.local.get(["browserConnectorSettings"]).then((result) => {
+chrome.storage.local.get(["browserConnectorSettings"], (result) => {
   if (result.browserConnectorSettings) {
     settings = { ...settings, ...result.browserConnectorSettings };
     updateUIFromSettings();
@@ -68,16 +33,10 @@ browserAPI.storage.local.get(["browserConnectorSettings"]).then((result) => {
 
   // Automatically discover server on panel load with quiet mode enabled
   discoverServer(true);
-}).catch((error) => {
-  console.error("Error loading settings:", error);
-
-  // Still create UI even if settings fail to load
-  createConnectionBanner();
-  discoverServer(true);
 });
 
 // Add listener for connection status updates from background script (page refresh events)
-browserAPI.runtime.onMessage.addListener((message, sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "CONNECTION_STATUS_UPDATE") {
     console.log(
       `Received connection status update: ${
@@ -207,12 +166,12 @@ function createConnectionBanner() {
   const banner = document.createElement("div");
   banner.id = "connection-banner";
   banner.style.cssText = `
-    padding: 6px 0px;
+    padding: 6px 0px; 
     margin-bottom: 4px;
-    width: 40%;
-    display: flex;
+    width: 40%; 
+    display: flex; 
     flex-direction: column;
-    align-items: flex-start;
+    align-items: flex-start; 
     background-color:rgba(0,0,0,0);
     border-radius: 11px;
     font-size: 11px;
@@ -267,13 +226,13 @@ function createConnectionBanner() {
   const indicator = document.createElement("div");
   indicator.id = "banner-status-indicator";
   indicator.style.cssText = `
-    width: 6px;
-    height: 6px;
+    width: 6px; 
+    height: 6px; 
     position: relative;
     top: 1px;
-    border-radius: 50%;
-    background-color: #ccc;
-    margin-right: 8px;
+    border-radius: 50%; 
+    background-color: #ccc; 
+    margin-right: 8px; 
     flex-shrink: 0;
     transition: background-color 0.3s ease;
   `;
@@ -401,11 +360,9 @@ function updateUIFromSettings() {
 
 // Save settings
 function saveSettings() {
-  browserAPI.storage.local.set({ browserConnectorSettings: settings }).catch((error) => {
-    console.error("Error saving settings:", error);
-  });
+  chrome.storage.local.set({ browserConnectorSettings: settings });
   // Notify devtools.js about settings change
-  browserAPI.runtime.sendMessage({
+  chrome.runtime.sendMessage({
     type: "SETTINGS_UPDATED",
     settings,
   });
@@ -522,7 +479,7 @@ async function testConnection(host, port) {
   try {
     // Use the identity endpoint instead of .port for more reliable validation
     const response = await fetch(`http://${host}:${port}/.identity`, {
-      signal: createTimeoutSignal(5000), // 5 second timeout
+      signal: AbortSignal.timeout(5000), // 5 second timeout
     });
 
     if (response.ok) {
@@ -621,7 +578,7 @@ async function tryServerConnection(host, port) {
         // Use a local controller for this specific request timeout
         // but also respect the global discovery cancellation
         signal: discoveryController
-          ? createCombinedSignal([controller.signal, discoveryController.signal])
+          ? AbortSignal.any([controller.signal, discoveryController.signal])
           : controller.signal,
       });
 
@@ -971,10 +928,10 @@ captureScreenshotButton.addEventListener("click", () => {
   captureScreenshotButton.textContent = "Capturing...";
 
   // Send message to background script to capture screenshot
-  browserAPI.runtime.sendMessage(
+  chrome.runtime.sendMessage(
     {
       type: "CAPTURE_SCREENSHOT",
-      tabId: browserAPI.devtools.inspectedWindow.tabId,
+      tabId: chrome.devtools.inspectedWindow.tabId,
       screenshotPath: settings.screenshotPath,
     },
     (response) => {

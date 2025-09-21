@@ -36,11 +36,24 @@ const currentTabId = browserAPI.devtools?.inspectedWindow?.tabId;
 const MAX_ATTACH_RETRIES = 3;
 const ATTACH_RETRY_DELAY = 1000; // 1 second
 
+// WebSocket connection management (declare early to avoid initialization errors)
+let ws = null;
+let wsReconnectTimeout = null;
+let heartbeatInterval = null;
+const WS_RECONNECT_DELAY = 5000; // 5 seconds
+const HEARTBEAT_INTERVAL = 30000; // 30 seconds
+// Add a flag to track if we need to reconnect after identity validation
+let reconnectAfterValidation = false;
+// Track if we're intentionally closing the connection
+let intentionalClosure = false;
+
 // Load saved settings on startup
-browserAPI.storage.local.get(["browserConnectorSettings"], (result) => {
+browserAPI.storage.local.get(["browserConnectorSettings"]).then((result) => {
   if (result.browserConnectorSettings) {
     settings = { ...settings, ...result.browserConnectorSettings };
   }
+}).catch((error) => {
+  console.error("Error loading settings:", error);
 });
 
 // Listen for settings updates
@@ -493,7 +506,21 @@ browserAPI.devtools.network.onNavigated.addListener((url) => {
 // 1) Listen for network requests
 browserAPI.devtools.network.onRequestFinished.addListener((request) => {
   if (request._resourceType === "xhr" || request._resourceType === "fetch") {
-    request.getContent((responseBody) => {
+    // Convert getContent to promise-based for cross-browser compatibility
+    const getContentPromise = new Promise((resolve) => {
+      try {
+        request.getContent(resolve);
+      } catch (error) {
+        // If callback version fails, try promise version
+        if (request.getContent && typeof request.getContent().then === 'function') {
+          request.getContent().then(resolve).catch(() => resolve(""));
+        } else {
+          resolve("");
+        }
+      }
+    });
+
+    getContentPromise.then((responseBody) => {
       const entry = {
         type: "network-request",
         url: request.request.url,
@@ -503,6 +530,20 @@ browserAPI.devtools.network.onRequestFinished.addListener((request) => {
         responseHeaders: request.response.headers,
         requestBody: request.request.postData?.text ?? "",
         responseBody: responseBody ?? "",
+      };
+      sendToBrowserConnector(entry);
+    }).catch((error) => {
+      console.error("Error getting network request content:", error);
+      // Send entry without response body if getContent fails
+      const entry = {
+        type: "network-request",
+        url: request.request.url,
+        method: request.request.method,
+        status: request.response.status,
+        requestHeaders: request.request.headers,
+        responseHeaders: request.response.headers,
+        requestBody: request.request.postData?.text ?? "",
+        responseBody: "",
       };
       sendToBrowserConnector(entry);
     });
@@ -695,7 +736,7 @@ const consoleMessageListener = (source, method, params) => {
 };
 
 // 2) Use DevTools Protocol to capture console logs
-browserAPI.devtools.panels.create("BrowserToolsMCP", "", "panel.html", (panel) => {
+browserAPI.devtools.panels.create("BrowserToolsMCP", "", "panel.html").then((panel) => {
   // Initial attach - we'll keep the debugger attached as long as DevTools is open
   attachDebugger();
 
@@ -705,6 +746,8 @@ browserAPI.devtools.panels.create("BrowserToolsMCP", "", "panel.html", (panel) =
       attachDebugger();
     }
   });
+}).catch((error) => {
+  console.error("Error creating DevTools panel:", error);
 });
 
 // Clean up when DevTools closes
@@ -782,16 +825,7 @@ browserAPI.devtools.panels.elements.onSelectionChanged.addListener(() => {
   captureAndSendElement();
 });
 
-// WebSocket connection management
-let ws = null;
-let wsReconnectTimeout = null;
-let heartbeatInterval = null;
-const WS_RECONNECT_DELAY = 5000; // 5 seconds
-const HEARTBEAT_INTERVAL = 30000; // 30 seconds
-// Add a flag to track if we need to reconnect after identity validation
-let reconnectAfterValidation = false;
-// Track if we're intentionally closing the connection
-let intentionalClosure = false;
+// WebSocket connection management variables are declared at the top of the file
 
 // Function to send a heartbeat to keep the WebSocket connection alive
 function sendHeartbeat() {
@@ -1015,53 +1049,104 @@ async function setupWebSocket() {
           // console.log("Chrome Extension: Received heartbeat response");
         } else if (message.type === "take-screenshot") {
           console.log("Chrome Extension: Taking screenshot...");
-          // Firefox-specific screenshot handling
+
+          // Check if tabs API is available (Chrome DevTools context)
+          let hasTabs = false;
+          let hasCaptureVisibleTab = false;
+
           try {
-            // In Firefox, we need to handle captureVisibleTab differently
-            browserAPI.tabs.captureVisibleTab(null, { format: "png" }, (dataUrl) => {
-              if (browserAPI.runtime.lastError) {
-                console.error(
-                  "Chrome Extension: Screenshot capture failed:",
-                  browserAPI.runtime.lastError
-                );
-              ws.send(
-                JSON.stringify({
-                  type: "screenshot-error",
-                  error: browserAPI.runtime.lastError.message,
+            hasTabs = !!browserAPI.tabs;
+            hasCaptureVisibleTab = !!(browserAPI.tabs && browserAPI.tabs.captureVisibleTab);
+          } catch (e) {
+            console.log("Chrome Extension: Error checking tabs API:", e.message);
+          }
+
+          console.log("Chrome Extension: Checking tabs API availability:", {
+            hasTabs,
+            hasCaptureVisibleTab
+          });
+
+          if (hasCaptureVisibleTab) {
+            // Chrome: Use tabs API directly in DevTools context
+            try {
+              browserAPI.tabs.captureVisibleTab(null, { format: "png" }, (dataUrl) => {
+                if (browserAPI.runtime.lastError) {
+                  console.error(
+                    "Chrome Extension: Screenshot capture failed:",
+                    browserAPI.runtime.lastError
+                  );
+                  ws.send(
+                    JSON.stringify({
+                      type: "screenshot-error",
+                      error: browserAPI.runtime.lastError.message,
+                      requestId: message.requestId,
+                    })
+                  );
+                  return;
+                }
+
+                console.log("Chrome Extension: Screenshot captured successfully");
+                // Just send the screenshot data, let the server handle paths
+                const response = {
+                  type: "screenshot-data",
+                  data: dataUrl,
                   requestId: message.requestId,
-                })
-              );
-              return;
+                  // Only include path if it's configured in settings
+                  ...(settings.screenshotPath && { path: settings.screenshotPath }),
+                  // Include auto-paste setting
+                  autoPaste: settings.allowAutoPaste,
+                };
+
+                console.log("Chrome Extension: Sending screenshot data response", {
+                  ...response,
+                  data: "[base64 data]",
+                });
+
+                ws.send(JSON.stringify(response));
+              });
+            } catch (error) {
+              console.error("Chrome Extension: Screenshot capture error:", error);
+              if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                  type: "screenshot-error",
+                  error: error.message,
+                  requestId: message.requestId,
+                }));
+              }
             }
-
-            console.log("Chrome Extension: Screenshot captured successfully");
-            // Just send the screenshot data, let the server handle paths
-            const response = {
-              type: "screenshot-data",
-              data: dataUrl,
+          } else {
+            // Firefox: Relay screenshot request to background script
+            console.log("Chrome Extension: Relaying screenshot request to background script");
+            browserAPI.runtime.sendMessage({
+              type: "CAPTURE_SCREENSHOT",
+              tabId: currentTabId,
+              screenshotPath: settings.screenshotPath,
               requestId: message.requestId,
-              // Only include path if it's configured in settings
-              ...(settings.screenshotPath && { path: settings.screenshotPath }),
-              // Include auto-paste setting
-              autoPaste: settings.allowAutoPaste,
-            };
-
-            console.log("Chrome Extension: Sending screenshot data response", {
-              ...response,
-              data: "[base64 data]",
-            });
-
-            ws.send(JSON.stringify(response));
-            });
-          } catch (error) {
-            console.error("Chrome Extension: Screenshot capture error:", error);
-            if (ws && ws.readyState === WebSocket.OPEN) {
+            }).then((response) => {
+              if (response && response.success) {
+                const wsResponse = {
+                  type: "screenshot-data",
+                  data: response.dataUrl,
+                  requestId: message.requestId,
+                  ...(settings.screenshotPath && { path: settings.screenshotPath }),
+                  autoPaste: settings.allowAutoPaste,
+                };
+                ws.send(JSON.stringify(wsResponse));
+              } else {
+                ws.send(JSON.stringify({
+                  type: "screenshot-error",
+                  error: response ? response.error : "Failed to capture screenshot",
+                  requestId: message.requestId,
+                }));
+              }
+            }).catch((error) => {
+              console.error("Chrome Extension: Error relaying screenshot request:", error);
               ws.send(JSON.stringify({
                 type: "screenshot-error",
                 error: error.message,
                 requestId: message.requestId,
               }));
-            }
+            });
           }
         } else if (message.type === "get-current-url") {
           console.log("Chrome Extension: Received request for current URL");

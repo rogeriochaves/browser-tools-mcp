@@ -84,39 +84,8 @@ browserAPI.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === "CAPTURE_SCREENSHOT" && message.tabId) {
-    // First get the server settings
-    browserAPI.storage.local.get(["browserConnectorSettings"], (result) => {
-      const settings = result.browserConnectorSettings || {
-        serverHost: "localhost",
-        serverPort: 3025,
-      };
-
-      // Validate server identity first
-      validateServerIdentity(settings.serverHost, settings.serverPort)
-        .then((isValid) => {
-          if (!isValid) {
-            console.error(
-              "Cannot capture screenshot: Not connected to a valid browser tools server"
-            );
-            sendResponse({
-              success: false,
-              error:
-                "Not connected to a valid browser tools server. Please check your connection settings.",
-            });
-            return;
-          }
-
-          // Continue with screenshot capture
-          captureAndSendScreenshot(message, settings, sendResponse);
-        })
-        .catch((error) => {
-          console.error("Error validating server:", error);
-          sendResponse({
-            success: false,
-            error: "Failed to validate server identity: " + error.message,
-          });
-        });
-    });
+    // Handle screenshot capture and return data to DevTools (for Firefox compatibility)
+    captureScreenshotForDevTools(message, sendResponse);
     return true; // Required to use sendResponse asynchronously
   }
 });
@@ -275,7 +244,8 @@ async function updateServerWithUrl(tabId, url, source = "background_update") {
   console.log(`Updating server with URL for tab ${tabId}: ${url}`);
 
   // Get the saved settings
-  browserAPI.storage.local.get(["browserConnectorSettings"], async (result) => {
+  try {
+    const result = await browserAPI.storage.local.get(["browserConnectorSettings"]);
     const settings = result.browserConnectorSettings || {
       serverHost: "localhost",
       serverPort: 3025,
@@ -339,7 +309,9 @@ async function updateServerWithUrl(tabId, url, source = "background_update") {
         `Failed to update server with URL after ${maxRetries} attempts`
       );
     }
-  });
+  } catch (error) {
+    console.error("Error getting settings for URL update:", error);
+  }
 }
 
 // Clean up when tabs are closed
@@ -352,7 +324,8 @@ async function retestConnectionOnRefresh(tabId) {
   console.log(`Page refreshed in tab ${tabId}, retesting connection...`);
 
   // Get the saved settings
-  browserAPI.storage.local.get(["browserConnectorSettings"], async (result) => {
+  try {
+    const result = await browserAPI.storage.local.get(["browserConnectorSettings"]);
     const settings = result.browserConnectorSettings || {
       serverHost: "localhost",
       serverPort: 3025,
@@ -387,6 +360,70 @@ async function retestConnectionOnRefresh(tabId) {
     } else {
       console.log("Connection test successful after page refresh");
     }
+  } catch (error) {
+    console.error("Error getting settings for connection retest:", error);
+  }
+}
+
+// Function to capture screenshot and return data to DevTools (Firefox compatibility)
+function captureScreenshotForDevTools(message, sendResponse) {
+  // Get the inspected window's tab
+  browserAPI.tabs.get(message.tabId, (tab) => {
+    if (browserAPI.runtime.lastError) {
+      console.error("Error getting tab:", browserAPI.runtime.lastError);
+      sendResponse({
+        success: false,
+        error: browserAPI.runtime.lastError.message,
+      });
+      return;
+    }
+
+    // Get all windows to find the one containing our tab
+    browserAPI.windows.getAll({ populate: true }, (windows) => {
+      const targetWindow = windows.find((w) =>
+        w.tabs.some((t) => t.id === message.tabId)
+      );
+
+      if (!targetWindow) {
+        console.error("Could not find window containing the inspected tab");
+        sendResponse({
+          success: false,
+          error: "Could not find window containing the inspected tab",
+        });
+        return;
+      }
+
+      // Capture screenshot of the window containing our tab
+      browserAPI.tabs.captureVisibleTab(
+        targetWindow.id,
+        { format: "png" },
+        (dataUrl) => {
+          // Ignore DevTools panel capture error if it occurs
+          if (
+            browserAPI.runtime.lastError &&
+            !browserAPI.runtime.lastError.message.includes("devtools://")
+          ) {
+            console.error(
+              "Error capturing screenshot:",
+              browserAPI.runtime.lastError
+            );
+            sendResponse({
+              success: false,
+              error: browserAPI.runtime.lastError.message,
+            });
+            return;
+          }
+
+          console.log("Screenshot captured successfully for DevTools");
+          // Return screenshot data to DevTools script
+          sendResponse({
+            success: true,
+            dataUrl: dataUrl,
+            title: tab.title || "Current Tab",
+          });
+        }
+      );
+    });
   });
 }
 

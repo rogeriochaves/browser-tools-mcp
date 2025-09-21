@@ -1,56 +1,5 @@
-// Cross-browser compatibility
-const browserAPI = typeof browser !== 'undefined' ? browser : chrome;
-
-// Cross-browser AbortSignal.timeout polyfill
-function createTimeoutSignal(timeout) {
-  if (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) {
-    return AbortSignal.timeout(timeout);
-  }
-
-  // Fallback for older browsers
-  const controller = new AbortController();
-  setTimeout(() => controller.abort(), timeout);
-  return controller.signal;
-}
-
 // Listen for messages from the devtools panel
-browserAPI.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  // Handle console messages from content scripts (Firefox compatibility)
-  if (message.type === "CONSOLE_MESSAGE_FROM_CONTENT") {
-    console.log("Background: Received console message from content script:", message.data);
-
-    // Send directly to browser connector server
-    const serverUrl = `http://localhost:3025/extension-log`;
-
-    const payload = {
-      data: {
-        ...message.data,
-        timestamp: Date.now(),
-      },
-      settings: {
-        logLimit: 50,
-        queryLimit: 30000,
-        showRequestHeaders: false,
-        showResponseHeaders: false,
-      },
-    };
-
-    fetch(serverUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    })
-    .then((response) => response.json())
-    .then((data) => {
-      console.log("Background: Console log sent to server successfully:", data);
-    })
-    .catch((error) => {
-      console.error("Background: Error sending console log to server:", error);
-    });
-
-    return true;
-  }
-
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "GET_CURRENT_URL" && message.tabId) {
     getCurrentTabUrl(message.tabId)
       .then((url) => {
@@ -85,14 +34,14 @@ browserAPI.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.type === "CAPTURE_SCREENSHOT" && message.tabId) {
     // First get the server settings
-    browserAPI.storage.local.get(["browserConnectorSettings"]).then((result) => {
+    chrome.storage.local.get(["browserConnectorSettings"], (result) => {
       const settings = result.browserConnectorSettings || {
         serverHost: "localhost",
         serverPort: 3025,
       };
 
       // Validate server identity first
-      return validateServerIdentity(settings.serverHost, settings.serverPort)
+      validateServerIdentity(settings.serverHost, settings.serverPort)
         .then((isValid) => {
           if (!isValid) {
             console.error(
@@ -116,12 +65,6 @@ browserAPI.runtime.onMessage.addListener((message, sender, sendResponse) => {
             error: "Failed to validate server identity: " + error.message,
           });
         });
-    }).catch((error) => {
-      console.error("Error getting settings:", error);
-      sendResponse({
-        success: false,
-        error: "Failed to get extension settings: " + error.message,
-      });
     });
     return true; // Required to use sendResponse asynchronously
   }
@@ -131,7 +74,7 @@ browserAPI.runtime.onMessage.addListener((message, sender, sendResponse) => {
 async function validateServerIdentity(host, port) {
   try {
     const response = await fetch(`http://${host}:${port}/.identity`, {
-      signal: createTimeoutSignal(3000), // 3 second timeout
+      signal: AbortSignal.timeout(3000), // 3 second timeout
     });
 
     if (!response.ok) {
@@ -185,7 +128,7 @@ async function getCurrentTabUrl(tabId) {
 
     // Otherwise get it from the tab
     try {
-      const tab = await browserAPI.tabs.get(tabId);
+      const tab = await chrome.tabs.get(tabId);
       if (tab && tab.url) {
         // Cache the URL
         tabUrls.set(tabId, tab.url);
@@ -200,7 +143,7 @@ async function getCurrentTabUrl(tabId) {
 
     // If we can't get the tab directly, try querying for active tabs
     try {
-      const tabs = await browserAPI.tabs.query({
+      const tabs = await chrome.tabs.query({
         active: true,
         currentWindow: true,
       });
@@ -224,7 +167,7 @@ async function getCurrentTabUrl(tabId) {
 }
 
 // Listen for tab updates to detect page refreshes and URL changes
-browserAPI.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   // Track URL changes
   if (changeInfo.url) {
     console.log(`URL changed in tab ${tabId} to ${changeInfo.url}`);
@@ -248,14 +191,14 @@ browserAPI.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 });
 
 // Listen for tab activation (switching between tabs)
-browserAPI.tabs.onActivated.addListener((activeInfo) => {
+chrome.tabs.onActivated.addListener((activeInfo) => {
   const tabId = activeInfo.tabId;
   console.log(`Tab activated: ${tabId}`);
 
   // Get the URL of the newly activated tab
-  browserAPI.tabs.get(tabId, (tab) => {
-    if (browserAPI.runtime.lastError) {
-      console.error("Error getting tab info:", browserAPI.runtime.lastError);
+  chrome.tabs.get(tabId, (tab) => {
+    if (chrome.runtime.lastError) {
+      console.error("Error getting tab info:", chrome.runtime.lastError);
       return;
     }
 
@@ -281,8 +224,7 @@ async function updateServerWithUrl(tabId, url, source = "background_update") {
   console.log(`Updating server with URL for tab ${tabId}: ${url}`);
 
   // Get the saved settings
-  try {
-    const result = await browserAPI.storage.local.get(["browserConnectorSettings"]);
+  chrome.storage.local.get(["browserConnectorSettings"], async (result) => {
     const settings = result.browserConnectorSettings || {
       serverHost: "localhost",
       serverPort: 3025,
@@ -315,7 +257,7 @@ async function updateServerWithUrl(tabId, url, source = "background_update") {
             source: source,
           }),
           // Add a timeout to prevent hanging requests
-          signal: createTimeoutSignal(5000),
+          signal: AbortSignal.timeout(5000),
         });
 
         if (response.ok) {
@@ -346,13 +288,11 @@ async function updateServerWithUrl(tabId, url, source = "background_update") {
         `Failed to update server with URL after ${maxRetries} attempts`
       );
     }
-  } catch (error) {
-    console.error("Error getting settings for URL update:", error);
-  }
+  });
 }
 
 // Clean up when tabs are closed
-browserAPI.tabs.onRemoved.addListener((tabId) => {
+chrome.tabs.onRemoved.addListener((tabId) => {
   tabUrls.delete(tabId);
 });
 
@@ -361,8 +301,7 @@ async function retestConnectionOnRefresh(tabId) {
   console.log(`Page refreshed in tab ${tabId}, retesting connection...`);
 
   // Get the saved settings
-  try {
-    const result = await browserAPI.storage.local.get(["browserConnectorSettings"]);
+  chrome.storage.local.get(["browserConnectorSettings"], async (result) => {
     const settings = result.browserConnectorSettings || {
       serverHost: "localhost",
       serverPort: 3025,
@@ -375,7 +314,7 @@ async function retestConnectionOnRefresh(tabId) {
     );
 
     // Notify all devtools instances about the connection status
-    browserAPI.runtime.sendMessage({
+    chrome.runtime.sendMessage({
       type: "CONNECTION_STATUS_UPDATE",
       isConnected: isConnected,
       tabId: tabId,
@@ -383,7 +322,7 @@ async function retestConnectionOnRefresh(tabId) {
 
     // Always notify for page refresh, whether connected or not
     // This ensures any ongoing discovery is cancelled and restarted
-    browserAPI.runtime.sendMessage({
+    chrome.runtime.sendMessage({
       type: "INITIATE_AUTO_DISCOVERY",
       reason: "page_refresh",
       tabId: tabId,
@@ -397,26 +336,24 @@ async function retestConnectionOnRefresh(tabId) {
     } else {
       console.log("Connection test successful after page refresh");
     }
-  } catch (error) {
-    console.error("Error getting settings for connection retest:", error);
-  }
+  });
 }
 
 // Function to capture and send screenshot
 function captureAndSendScreenshot(message, settings, sendResponse) {
   // Get the inspected window's tab
-  browserAPI.tabs.get(message.tabId, (tab) => {
-    if (browserAPI.runtime.lastError) {
-      console.error("Error getting tab:", browserAPI.runtime.lastError);
+  chrome.tabs.get(message.tabId, (tab) => {
+    if (chrome.runtime.lastError) {
+      console.error("Error getting tab:", chrome.runtime.lastError);
       sendResponse({
         success: false,
-        error: browserAPI.runtime.lastError.message,
+        error: chrome.runtime.lastError.message,
       });
       return;
     }
 
     // Get all windows to find the one containing our tab
-    browserAPI.windows.getAll({ populate: true }, (windows) => {
+    chrome.windows.getAll({ populate: true }, (windows) => {
       const targetWindow = windows.find((w) =>
         w.tabs.some((t) => t.id === message.tabId)
       );
@@ -431,22 +368,22 @@ function captureAndSendScreenshot(message, settings, sendResponse) {
       }
 
       // Capture screenshot of the window containing our tab
-      browserAPI.tabs.captureVisibleTab(
+      chrome.tabs.captureVisibleTab(
         targetWindow.id,
         { format: "png" },
         (dataUrl) => {
           // Ignore DevTools panel capture error if it occurs
           if (
-            browserAPI.runtime.lastError &&
-            !browserAPI.runtime.lastError.message.includes("devtools://")
+            chrome.runtime.lastError &&
+            !chrome.runtime.lastError.message.includes("devtools://")
           ) {
             console.error(
               "Error capturing screenshot:",
-              browserAPI.runtime.lastError
+              chrome.runtime.lastError
             );
             sendResponse({
               success: false,
-              error: browserAPI.runtime.lastError.message,
+              error: chrome.runtime.lastError.message,
             });
             return;
           }
