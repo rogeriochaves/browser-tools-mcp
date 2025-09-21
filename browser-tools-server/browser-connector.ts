@@ -1076,7 +1076,7 @@ export class BrowserConnector {
         const appleScript = `
           -- Set path to the screenshot
           set imagePath to "${fullPath}"
-          
+
           -- Copy the image to clipboard
           try
             set the clipboard to (read (POSIX file imagePath) as «class PNGf»)
@@ -1084,7 +1084,7 @@ export class BrowserConnector {
             log "Error copying image to clipboard: " & errMsg
             return "Failed to copy image to clipboard: " & errMsg
           end try
-          
+
           -- Activate Cursor application
           try
             tell application "Cursor"
@@ -1094,10 +1094,10 @@ export class BrowserConnector {
             log "Error activating Cursor: " & errMsg
             return "Failed to activate Cursor: " & errMsg
           end try
-          
+
           -- Wait for the application to fully activate
           delay 3
-          
+
           -- Try to interact with Cursor
           try
             tell application "System Events"
@@ -1106,12 +1106,12 @@ export class BrowserConnector {
                 if (count of windows) is 0 then
                   return "No windows found in Cursor"
                 end if
-                
+
                 set cursorWindow to window 1
-                
+
                 -- Try Method 1: Look for elements of class "Text Area"
                 set foundElements to {}
-                
+
                 -- Try different selectors to find the text input area
                 try
                   -- Try with class
@@ -1120,7 +1120,7 @@ export class BrowserConnector {
                     set foundElements to textAreas
                   end if
                 end try
-                
+
                 if (count of foundElements) is 0 then
                   try
                     -- Try with AXTextField role
@@ -1130,7 +1130,7 @@ export class BrowserConnector {
                     end if
                   end try
                 end if
-                
+
                 if (count of foundElements) is 0 then
                   try
                     -- Try with AXTextArea role in nested elements
@@ -1149,7 +1149,7 @@ export class BrowserConnector {
                     end repeat
                   end try
                 end if
-                
+
                 -- If no elements found with specific attributes, try a broader approach
                 if (count of foundElements) is 0 then
                   -- Just try to use the Command+V shortcut on the active window
@@ -1166,16 +1166,16 @@ export class BrowserConnector {
                 else
                   -- We found a potential text input element
                   set inputElement to item 1 of foundElements
-                  
+
                   -- Try to focus and paste
                   try
                     set focused of inputElement to true
                     delay 0.5
-                    
+
                     -- Paste the image
                     keystroke "v" using command down
                     delay 1
-                    
+
                     -- Type the text
                     keystroke "here is the screenshot"
                     delay 1
@@ -1232,8 +1232,11 @@ export class BrowserConnector {
       }
 
       res.json({
+        success: true,
         path: fullPath,
         filename: filename,
+        data: base64Data, // Include the original base64 data with data URL prefix
+        message: "Screenshot captured and saved successfully",
       });
     } catch (error) {
       const errorMessage =
