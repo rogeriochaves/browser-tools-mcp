@@ -85,14 +85,14 @@ browserAPI.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.type === "CAPTURE_SCREENSHOT" && message.tabId) {
     // First get the server settings
-    browserAPI.storage.local.get(["browserConnectorSettings"]).then((result) => {
+    browserAPI.storage.local.get(["browserConnectorSettings"], (result) => {
       const settings = result.browserConnectorSettings || {
         serverHost: "localhost",
         serverPort: 3025,
       };
 
       // Validate server identity first
-      return validateServerIdentity(settings.serverHost, settings.serverPort)
+      validateServerIdentity(settings.serverHost, settings.serverPort)
         .then((isValid) => {
           if (!isValid) {
             console.error(
@@ -116,12 +116,6 @@ browserAPI.runtime.onMessage.addListener((message, sender, sendResponse) => {
             error: "Failed to validate server identity: " + error.message,
           });
         });
-    }).catch((error) => {
-      console.error("Error getting settings:", error);
-      sendResponse({
-        success: false,
-        error: "Failed to get extension settings: " + error.message,
-      });
     });
     return true; // Required to use sendResponse asynchronously
   }
@@ -281,8 +275,7 @@ async function updateServerWithUrl(tabId, url, source = "background_update") {
   console.log(`Updating server with URL for tab ${tabId}: ${url}`);
 
   // Get the saved settings
-  try {
-    const result = await browserAPI.storage.local.get(["browserConnectorSettings"]);
+  browserAPI.storage.local.get(["browserConnectorSettings"], async (result) => {
     const settings = result.browserConnectorSettings || {
       serverHost: "localhost",
       serverPort: 3025,
@@ -346,9 +339,7 @@ async function updateServerWithUrl(tabId, url, source = "background_update") {
         `Failed to update server with URL after ${maxRetries} attempts`
       );
     }
-  } catch (error) {
-    console.error("Error getting settings for URL update:", error);
-  }
+  });
 }
 
 // Clean up when tabs are closed
@@ -361,8 +352,7 @@ async function retestConnectionOnRefresh(tabId) {
   console.log(`Page refreshed in tab ${tabId}, retesting connection...`);
 
   // Get the saved settings
-  try {
-    const result = await browserAPI.storage.local.get(["browserConnectorSettings"]);
+  browserAPI.storage.local.get(["browserConnectorSettings"], async (result) => {
     const settings = result.browserConnectorSettings || {
       serverHost: "localhost",
       serverPort: 3025,
@@ -397,9 +387,7 @@ async function retestConnectionOnRefresh(tabId) {
     } else {
       console.log("Connection test successful after page refresh");
     }
-  } catch (error) {
-    console.error("Error getting settings for connection retest:", error);
-  }
+  });
 }
 
 // Function to capture and send screenshot

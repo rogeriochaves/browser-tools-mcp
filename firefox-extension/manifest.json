@@ -1,0 +1,32 @@
+{
+  "name": "BrowserTools MCP",
+  "version": "1.2.0",
+  "description": "MCP tool for AI code editors to capture data from a browser such as console logs, network requests, screenshots and more",
+  "manifest_version": 2,
+  "devtools_page": "devtools.html",
+  "permissions": [
+    "activeTab",
+    "storage",
+    "tabs",
+    "<all_urls>",
+    "debugger"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["console-capture.js"],
+      "run_at": "document_start",
+      "all_frames": true
+    }
+  ],
+  "background": {
+    "scripts": ["webextension-polyfill.js", "background.js"],
+    "persistent": true
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "browsertools-mcp@example.com",
+      "strict_min_version": "109.0"
+    }
+  }
+}

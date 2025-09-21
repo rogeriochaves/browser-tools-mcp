@@ -36,24 +36,11 @@ const currentTabId = browserAPI.devtools?.inspectedWindow?.tabId;
 const MAX_ATTACH_RETRIES = 3;
 const ATTACH_RETRY_DELAY = 1000; // 1 second
 
-// WebSocket connection management (declare early to avoid initialization errors)
-let ws = null;
-let wsReconnectTimeout = null;
-let heartbeatInterval = null;
-const WS_RECONNECT_DELAY = 5000; // 5 seconds
-const HEARTBEAT_INTERVAL = 30000; // 30 seconds
-// Add a flag to track if we need to reconnect after identity validation
-let reconnectAfterValidation = false;
-// Track if we're intentionally closing the connection
-let intentionalClosure = false;
-
 // Load saved settings on startup
-browserAPI.storage.local.get(["browserConnectorSettings"]).then((result) => {
+browserAPI.storage.local.get(["browserConnectorSettings"], (result) => {
   if (result.browserConnectorSettings) {
     settings = { ...settings, ...result.browserConnectorSettings };
   }
-}).catch((error) => {
-  console.error("Error loading settings:", error);
 });
 
 // Listen for settings updates
@@ -506,21 +493,7 @@ browserAPI.devtools.network.onNavigated.addListener((url) => {
 // 1) Listen for network requests
 browserAPI.devtools.network.onRequestFinished.addListener((request) => {
   if (request._resourceType === "xhr" || request._resourceType === "fetch") {
-    // Convert getContent to promise-based for cross-browser compatibility
-    const getContentPromise = new Promise((resolve) => {
-      try {
-        request.getContent(resolve);
-      } catch (error) {
-        // If callback version fails, try promise version
-        if (request.getContent && typeof request.getContent().then === 'function') {
-          request.getContent().then(resolve).catch(() => resolve(""));
-        } else {
-          resolve("");
-        }
-      }
-    });
-
-    getContentPromise.then((responseBody) => {
+    request.getContent((responseBody) => {
       const entry = {
         type: "network-request",
         url: request.request.url,
@@ -530,20 +503,6 @@ browserAPI.devtools.network.onRequestFinished.addListener((request) => {
         responseHeaders: request.response.headers,
         requestBody: request.request.postData?.text ?? "",
         responseBody: responseBody ?? "",
-      };
-      sendToBrowserConnector(entry);
-    }).catch((error) => {
-      console.error("Error getting network request content:", error);
-      // Send entry without response body if getContent fails
-      const entry = {
-        type: "network-request",
-        url: request.request.url,
-        method: request.request.method,
-        status: request.response.status,
-        requestHeaders: request.request.headers,
-        responseHeaders: request.response.headers,
-        requestBody: request.request.postData?.text ?? "",
-        responseBody: "",
       };
       sendToBrowserConnector(entry);
     });
@@ -736,7 +695,7 @@ const consoleMessageListener = (source, method, params) => {
 };
 
 // 2) Use DevTools Protocol to capture console logs
-browserAPI.devtools.panels.create("BrowserToolsMCP", "", "panel.html").then((panel) => {
+browserAPI.devtools.panels.create("BrowserToolsMCP", "", "panel.html", (panel) => {
   // Initial attach - we'll keep the debugger attached as long as DevTools is open
   attachDebugger();
 
@@ -746,8 +705,6 @@ browserAPI.devtools.panels.create("BrowserToolsMCP", "", "panel.html").then((pan
       attachDebugger();
     }
   });
-}).catch((error) => {
-  console.error("Error creating DevTools panel:", error);
 });
 
 // Clean up when DevTools closes
@@ -825,7 +782,16 @@ browserAPI.devtools.panels.elements.onSelectionChanged.addListener(() => {
   captureAndSendElement();
 });
 
-// WebSocket connection management variables are declared at the top of the file
+// WebSocket connection management
+let ws = null;
+let wsReconnectTimeout = null;
+let heartbeatInterval = null;
+const WS_RECONNECT_DELAY = 5000; // 5 seconds
+const HEARTBEAT_INTERVAL = 30000; // 30 seconds
+// Add a flag to track if we need to reconnect after identity validation
+let reconnectAfterValidation = false;
+// Track if we're intentionally closing the connection
+let intentionalClosure = false;
 
 // Function to send a heartbeat to keep the WebSocket connection alive
 function sendHeartbeat() {
